@@ -1,124 +1,43 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+# ──────────────────────────────────────────────
+# CubeSat Mission Configuration
+# ──────────────────────────────────────────────
 
-from spacecraft import Spacecraft
-from lifecycle import update
-from telemetrysources import get_telemetry
-from fdir import detect_faults, isolate_faults, recover_faults, recovery_complete
-from config import SATELLITE_NAME, MISSION_ID, POWER_LOW_THRESHOLD, TEMP_FAULT_HIGH, TEMP_FAULT_LOW
+SATELLITE_NAME = "28ZENITH"
+MISSION_ID = "ZX-2026-002"
+ORBIT_ALTITUDE_KM = 550
 
-app = FastAPI(title=f"{SATELLITE_NAME} Mission Control API")
+# ── Power Subsystem ──────────────────────────
+BATTERY_MAX = 100.0
+BATTERY_MIN = 0.0
+BATTERY_CAPACITY_WH = 20.0          # Watt-hours
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+POWER_LOW_THRESHOLD = 20.0          # % → triggers LOW_BATTERY fault
+POWER_CRITICAL_THRESHOLD = 10.0     # % → emergency shutdown
+POWER_RECOVER_THRESHOLD = 40.0      # % → fault resolved
 
-# ── Simulation State ──────────────────────────────────────────────────────────
-sc = Spacecraft()
-step_counter = 0
-event_log = []   # rolling 100 entries
+SOLAR_CHARGE_RATE = 1.8             # % per step (in sunlight)
+PAYLOAD_DRAIN_RATE = 2.0            # % per step (payload ON)
+IDLE_DRAIN_RATE = 0.4               # % per step (idle)
 
+# ── Thermal Subsystem ────────────────────────
+TEMP_MAX = 80.0
+TEMP_MIN = -20.0
+TEMP_FAULT_HIGH = 50.0              # °C → HIGH_TEMP fault
+TEMP_FAULT_LOW  = -15.0             # °C → LOW_TEMP fault
+TEMP_RECOVER_HIGH = 40.0            # °C → fault resolved
+TEMP_RECOVER_LOW  = -5.0            # °C → fault resolved
+TEMP_SPACE_AMBIENT = -10.0          # °C passive sink target
+TEMP_SUNLIGHT_GAIN  = 2.0           # °C per step (sunlight)
+TEMP_SHADOW_LOSS    = 1.5           # °C per step (eclipse)
+TEMP_PAYLOAD_GAIN   = 1.5           # °C per step (payload on)
 
-def log_event(step, kind, detail):
-    event_log.append({"step": step, "kind": kind, "detail": detail})
-    if len(event_log) > 100:
-        event_log.pop(0)
+# ── Communications ────────────────────────────
+COMMS_LINK_MARGIN_DB = 8.5
+COMMS_FREQUENCY_MHZ  = 437.1
 
+# ── Orbit ────────────────────────────────────
+ORBIT_PERIOD_STEPS   = 48            # steps per full orbit
+SUNLIGHT_FRACTION    = 0.65          # 65% of orbit in sunlight
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
-
-@app.get("/step")
-def step_simulation():
-    global step_counter
-    step_counter += 1
-
-    update(sc)
-
-    faults = detect_faults(sc)
-    isolation_actions = []
-    recovery_actions  = []
-    resolved_faults   = []
-
-    if faults:
-        for f in faults:
-            log_event(step_counter, "FAULT", f"{f['type']} ({f['subsystem']})")
-
-        isolation_actions = isolate_faults(sc, faults)
-        for action in isolation_actions:
-            sc.execute(action)
-
-        recovery_actions = recover_faults(sc, faults)
-        for action in recovery_actions:
-            sc.execute(action)
-
-    if sc.mode in ("SAFE", "EMERGENCY"):
-        resolved_faults = recovery_complete(sc)
-
-        if resolved_faults:
-            sc.active_faults -= resolved_faults
-            for r in resolved_faults:
-                log_event(step_counter, "RESOLVED", r)
-
-        if not sc.active_faults:
-            sc.execute("EXIT_SAFE_MODE")
-            sc.execute("EXIT_EMERGENCY")
-
-            if sc.pre_fault_payload_state:
-                if (sc.battery > 40 and
-                        TEMP_FAULT_LOW < sc.temperature < TEMP_FAULT_HIGH and
-                        sc.in_sunlight):
-                    sc.execute("PAYLOAD_ON")
-                    log_event(step_counter, "RECOVERY", "Payload restored to ON")
-
-            sc.pre_fault_payload_state = None
-            log_event(step_counter, "NOMINAL", "Spacecraft returned to NOMINAL")
-
-    # Orbit transition logging
-    if sc.orbit_step == 0:
-        log_event(step_counter, "ORBIT", f"Orbit #{sc.orbit_number} started")
-
-    return {
-        "step":       step_counter,
-        "mode":       sc.mode,
-        "telemetry":  get_telemetry(sc),
-        "faults":     faults,
-        "active_faults": list(sc.active_faults),
-        "isolation":  isolation_actions,
-        "recovery":   recovery_actions,
-        "resolved":   list(resolved_faults),
-        "events":     event_log[-10:],
-    }
-
-
-@app.get("/status")
-def get_status():
-    return {
-        "step":    step_counter,
-        "mode":    sc.mode,
-        "telemetry": get_telemetry(sc),
-        "active_faults": list(sc.active_faults),
-    }
-
-
-@app.get("/events")
-def get_events():
-    return {"events": event_log}
-
-
-@app.post("/reset")
-def reset_simulation():
-    global sc, step_counter, event_log
-    sc = Spacecraft()
-    step_counter = 0
-    event_log = []
-    return {"status": "reset", "message": "Simulation reset to initial state"}
-
-
-@app.post("/command/{cmd}")
-def send_command(cmd: str):
-    sc.execute(cmd)
-    log_event(step_counter, "COMMAND", cmd)
-    return {"status": "ok", "command": cmd}
+# ── Simulation ───────────────────────────────
+TIME_STEP_MIN = 1                    # minutes per step
